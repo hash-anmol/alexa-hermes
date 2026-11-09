@@ -1,0 +1,19 @@
+{
+  "name": "alexa-hermes",
+  "version": "1.0.0",
+  "description": "Talk to your Hermes agent through an Alexa speaker: a private Alexa skill that streams Hermes' answers back as live speech.",
+  "bin": { "alexa-hermes": "bin/alexa-hermes.js" },
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node bin/alexa-hermes.js start",
+    "test": "node --test test/*.test.js",
+    "doctor": "node bin/alexa-hermes.js doctor"
+  },
+  "engines": { "node": ">=18" },
+  "keywords": ["alexa", "hermes", "hermes-agent", "voice", "echo", "ai-agent"],
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "alexa-verifier": "4.0.0"
+  }
+}

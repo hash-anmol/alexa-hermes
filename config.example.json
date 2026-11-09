@@ -1,0 +1,35 @@
+{
+  "hermes": {
+    "mode": "local",
+    "bin": "hermes",
+    "session": "alexa",
+    "timeoutMs": 90000,
+    "yolo": false
+  },
+
+  "skill": {
+    "invocation": "hermes",
+    "applicationId": "amzn1.ask.skill.PASTE-YOUR-SKILL-ID",
+    "publicBase": "https://YOUR-PUBLIC-HOST",
+    "port": 8787,
+    "conversation": true,
+    "fastReplyMs": 6000,
+    "alarmSound": "alarm.mp3",
+    "maxRingMinutes": 30,
+    "profiles": {},
+    "extraPhrases": {},
+    "speech": {
+      "enabled": true,
+      "voice": "bf_emma",
+      "lang": "en-gb",
+      "speed": 1.0,
+      "foregroundSec": 900,
+      "maxMinutes": 45
+    }
+  },
+
+  "health": {
+    "bridgeName": "the bridge",
+    "hermesName": "the Hermes machine"
+  }
+}

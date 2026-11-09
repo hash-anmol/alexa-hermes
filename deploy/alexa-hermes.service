@@ -1,0 +1,15 @@
+[Unit]
+Description=Alexa Hermes skill server (talk to Hermes through an Alexa speaker)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%ROOT%
+Environment=ALEXA_HERMES_CONFIG=%CONFIG%
+ExecStart=%NODE% %ROOT%/bin/alexa-hermes.js start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

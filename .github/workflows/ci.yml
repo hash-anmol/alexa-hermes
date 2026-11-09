@@ -1,0 +1,21 @@
+name: tests
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci --omit=dev
+      - run: npm test
+      - name: setup.sh runs from a clean checkout
+        run: |
+          ./setup.sh --yes --mode gateway --url http://127.0.0.1:9 --token ci
+          node bin/alexa-hermes.js model ci build/ci-model.json

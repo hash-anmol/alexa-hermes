@@ -1,0 +1,18 @@
+node_modules/
+config.json
+*.log
+
+# runtime state (tokens, pending answers, the audio secret) and build output
+data/
+build/
+.venv/
+
+# the alarm sound is your own file (and may be copyrighted): never committed
+audio/*
+!audio/.gitkeep
+*.mp3
+*.m4a
+*.aac
+*.wav
+*.ogg
+*.flac
