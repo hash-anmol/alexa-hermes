@@ -65,4 +65,15 @@ const clearPending = () => {
     }
 };
 
-module.exports = { readPending, writePending, clearPending, AUDIO_DIR, readRequest, readEvents, requestRing, endRing, recordEvent, requestFile, eventsFile };
+// The Hermes conversation you can pick up again ("ask Hermes, continue"): one per Hermes profile.
+//   { <profile or "default">: { name, updatedAt, turns, last } }   name is the Hermes session name (hermes chat --continue <name>)
+const convoFile = () => path.join(DATA_DIR, 'skill-conversations.json');
+const readConvos = () => readJson(convoFile(), {});
+const writeConvos = (c) => writeJson(convoFile(), c);
+
+// Switches you set by voice and that survive a restart, e.g. { musicMode: true }.
+const prefsFile = () => path.join(DATA_DIR, 'skill-prefs.json');
+const readPrefs = () => readJson(prefsFile(), {});
+const writePrefs = (patch) => writeJson(prefsFile(), { ...readPrefs(), ...patch });
+
+module.exports = { readConvos, writeConvos, readPrefs, writePrefs, readPending, writePending, clearPending, AUDIO_DIR, readRequest, readEvents, requestRing, endRing, recordEvent, requestFile, eventsFile };

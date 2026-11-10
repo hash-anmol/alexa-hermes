@@ -10,6 +10,7 @@
 //   3. health / test / update / yolo   -> instant checks that never touch the AI
 
 const { explain } = require('./lib/errors');
+const convo = require('./conversation');
 
 // Alexa's SearchQuery slot needs a carrier word in every sample, and the carrier is cut off from the slot value.
 // One intent per carrier lets us put the word back, so Hermes hears the whole sentence.
@@ -32,6 +33,9 @@ const QUERY_INTENTS = {
     AskCheckIntent: { prefix: 'check ', samples: ['check {query}'] },
     AskSearchIntent: { prefix: 'search ', samples: ['search {query}'] },
     AskPleaseIntent: { prefix: '', samples: ['please {query}'] },
+    // "ask Hermes, continue <what you add>" / "follow up <what you add>": the last conversation goes on, with the carrier word dropped
+    AskContinueIntent: { prefix: '', resume: true, samples: ['continue {query}', 'continue'] },
+    AskFollowUpIntent: { prefix: '', resume: true, samples: ['follow up {query}', 'follow up'] },
 };
 
 const RING_SAMPLES = ['ring the alarm', 'start the alarm', 'play the alarm', 'ring my alarm'];
@@ -46,16 +50,24 @@ const HEALTH_SAMPLES = ['server health', 'health report', 'health check', 'serve
 const YOLO_ON_SAMPLES = ['turn on yolo mode', 'yolo mode on', 'enable yolo mode', 'stop asking for permission', 'no more permission prompts'];
 const YOLO_OFF_SAMPLES = ['turn off yolo mode', 'yolo mode off', 'disable yolo mode', 'ask for permission again', 'start asking for permission'];
 const YOLO_STATUS_SAMPLES = ['yolo mode status', 'yolo status', 'yolo mode check'];
+// Neither starts with an opening word of the free-form questions, so Alexa can never mistake them for one.
+const NEW_CHAT_SAMPLES = ['start over', 'fresh start', 'different topic', 'change the subject', 'reset conversation'];
+const MUSIC_ON_SAMPLES = ['music mode on', 'turn on music mode', 'enable music mode', 'protect my music', 'bluetooth mode on'];
+const MUSIC_OFF_SAMPLES = ['music mode off', 'turn off music mode', 'disable music mode', 'bluetooth mode off'];
 const PENDING_FRESH_MS = 30 * 60 * 1000;
-const MAX_SPOKEN = 900;
+const MAX_SPOKEN = 3000;
 const RING_FRESH_MS = 2 * 60 * 1000; // a ring requested within the last 2 minutes is still the current one
 
 const empty = () => ({ version: '1.0', response: {} });
 
-function say(text, { end = true, reprompt } = {}) {
+// conv: the Hermes conversation to keep going if the session stays open (null: forget it)
+function say(text, { end = true, reprompt, conv } = {}) {
     const response = { outputSpeech: { type: 'PlainText', text: String(text).slice(0, MAX_SPOKEN) }, shouldEndSession: end };
     if (!end && reprompt) response.reprompt = { outputSpeech: { type: 'PlainText', text: reprompt } };
-    return { version: '1.0', response };
+    const out = { version: '1.0', response };
+    if (conv) out.sessionAttributes = { conv };
+    else if (conv === null) out.sessionAttributes = {};
+    return out;
 }
 
 const play = (url, token, { enqueueAfter } = {}) => ({
@@ -144,22 +156,70 @@ function stop(ctx) {
 
 // ---- talking to Hermes ----
 
-async function chat(text, ctx) {
+// Does the Echo keep listening after Hermes answers? By default only when Hermes asked you something.
+//   config.skill.listen: "question" (default) | "always" | "never"
+function listenAfter(ctx, answer) {
+    const sk = ctx.config.skill || {};
+    const mode = sk.conversation === false ? 'never' : sk.listen || 'question';
+    return mode === 'always' || (mode === 'question' && convo.askedQuestion(answer));
+}
+
+function conversation(ctx, resume) {
+    const sk = ctx.config.skill || {};
+    return convo.pick({ attrs: ctx.attrs, store: ctx.state.readConvos(), profile: ctx.profile, resume, now: ctx.now(), maxAgeMs: (sk.resumeHours ?? 12) * convo.HOUR });
+}
+
+const remember = (ctx, c, question) => ctx.state.writeConvos(convo.remember({ store: ctx.state.readConvos(), profile: ctx.profile, name: c.name, question, now: ctx.now() }));
+
+const reply = (ctx, c, text) => {
+    const listen = listenAfter(ctx, text);
+    return say(text, { end: !listen, reprompt: listen ? "Go ahead, I'm listening." : undefined, conv: c.name });
+};
+
+const streamAnswer = (ctx, id) => ({ version: '1.0', response: { directives: [play(ctx.voiceUrl(id), `voice|${id}`)], shouldEndSession: true } });
+
+// resume: this is "continue ..." / "follow up ..." (also "tell me more"): the last conversation goes on instead of a new one.
+async function chat(text, ctx, { resume = false } = {}) {
+    const inSession = !!(ctx.attrs && ctx.attrs.conv);
+    const asked = resume; // said "continue" out loud: tell you when the last conversation is too old
+    if (!resume && !inSession && convo.FOLLOW_UP.test(text)) resume = true;
+    const c = conversation(ctx, resume);
+    remember(ctx, c, text);
+    const stale = asked && c.stale ? 'That conversation is too old, so this is a new one.' : '';
+    const sk = ctx.config.skill || {};
+
     if (ctx.voice) {
-        // Spoken answer stream: Hermes starts now, the Echo plays a live audio stream that talks when there is something to say.
         // An earlier background task that finished since you last talked: tell you first.
         const earlier = ctx.state.readPending();
-        let preface;
+        let preface = stale;
         if (earlier && earlier.background && earlier.status === 'ready' && ctx.now() - (earlier.readyAt || 0) < PENDING_FRESH_MS) {
-            preface = `Before I start: your earlier task finished. ${String(earlier.answer || '').slice(0, 300)}`;
+            preface = `${preface} Before I start: your earlier task finished. ${String(earlier.answer || '').slice(0, 300)}`.trim();
         }
-        const { id } = ctx.voice.start(text, { profile: ctx.profile, preface });
-        return { version: '1.0', response: { directives: [play(ctx.voiceUrl(id), `voice|${id}`)], shouldEndSession: true } };
+        // The spoken stream takes the speaker over (AudioPlayer), and that drops Bluetooth music. So an answer that arrives in
+        // time is said in Alexa's own voice instead: the music just ducks. Only a slow one becomes a stream, unless music mode is on.
+        const music = ctx.state.readPrefs().musicMode === true;
+        const quickMs = (sk.speech || {}).quickReplyMs ?? 7000;
+        const inline = !!ctx.voice.settle && (music || quickMs > 0);
+        const { id } = ctx.voice.start(text, { profile: ctx.profile, preface: inline ? undefined : preface || undefined, session: c.name, defer: inline, hint: true });
+        if (!inline) return streamAnswer(ctx, id);
+        const r = await ctx.voice.settle(id, quickMs || 7000);
+        if (r) {
+            ctx.voice.discard(id);
+            if (r.error) return say(`${preface} ${r.error.spoken}`.trim(), { conv: null });
+            return reply(ctx, c, `${preface} ${r.answer}`.trim());
+        }
+        if (music) {
+            // The session stays open a moment: "give me the answer" works without saying "Alexa, ask Hermes" again.
+            return say(`${preface} On it. Give it a moment, then say: give me the answer.`.trim(), { end: false, reprompt: "Say: give me the answer, when you're ready.", conv: c.name });
+        }
+        ctx.voice.promote(id);
+        return streamAnswer(ctx, id);
     }
-    const sk = ctx.config.skill || {};
+
     const fastMs = sk.fastReplyMs ?? 6000;
-    const conversation = sk.conversation !== false;
-    const answer = ctx.profile ? ctx.askHermes(text, { profile: ctx.profile }) : ctx.askHermes(text);
+    const opts = { session: c.name };
+    if (ctx.profile) opts.profile = ctx.profile;
+    const answer = ctx.askHermes(text, opts);
     let timer;
     const settled = answer.then(
         (v) => ({ ok: true, v }),
@@ -168,7 +228,7 @@ async function chat(text, ctx) {
     const first = await Promise.race([settled, new Promise((r) => (timer = setTimeout(() => r(null), fastMs)))]);
     clearTimeout(timer);
 
-    if (first && first.ok) return say(first.v, { end: !conversation, reprompt: 'Anything else?' });
+    if (first && first.ok) return reply(ctx, c, `${stale} ${first.v}`.trim());
     if (first && !first.ok) {
         const why = explain(first.e);
         ctx.log(`Hermes failed (${why.kind}): ${why.detail}`);
@@ -176,13 +236,40 @@ async function chat(text, ctx) {
     }
     // Too slow for Alexa's ~8 second limit and no spoken stream: keep the answer, you ask for it:
     // "Alexa, ask Hermes, give me the answer".
-    ctx.state.writePending({ status: 'working', question: text, startedAt: ctx.now() });
+    ctx.state.writePending({ status: 'working', question: text, startedAt: ctx.now(), conv: c.name });
     settled.then((r) => {
         const answer = r.ok ? r.v : "Sorry, Hermes didn't answer.";
         if (!r.ok) ctx.log(`Hermes failed: ${r.e.message}`);
-        ctx.state.writePending({ status: 'ready', question: text, answer, startedAt: ctx.now(), readyAt: ctx.now() });
+        ctx.state.writePending({ status: 'ready', question: text, answer, startedAt: ctx.now(), readyAt: ctx.now(), conv: c.name });
     });
     return say('On it. Give it a few seconds, then say: ask Hermes, give me the answer.');
+}
+
+// "continue" on its own: the last conversation is open again and the Echo listens for what you add.
+function resumeListen(ctx) {
+    const c = conversation(ctx, true);
+    if (c.stale) return say("I don't have a recent conversation to continue. Ask me something first.");
+    const last = (ctx.state.readConvos()[convo.keyOf(ctx.profile)] || {}).last;
+    const about = last ? ` Last we talked about: ${last.length > 90 ? `${last.slice(0, 89).trim()}…` : last}.` : '';
+    return say(`Okay, picking up where we left off.${about} What would you like to add?`, { end: false, reprompt: "Go ahead, I'm listening.", conv: c.name });
+}
+
+// "start over": the next question is a new conversation.
+function newChat(ctx) {
+    const store = ctx.state.readConvos();
+    delete store[convo.keyOf(ctx.profile)];
+    ctx.state.writeConvos(store);
+    return say('Okay, fresh start. What would you like to ask?', { end: false, reprompt: "Go ahead, I'm listening.", conv: null });
+}
+
+// "music mode": never take the speaker over with a stream, so Bluetooth music is not interrupted.
+function musicMode(on, ctx) {
+    ctx.state.writePrefs({ musicMode: on });
+    return say(
+        on
+            ? "Music mode is on. I'll answer in my own voice and your Bluetooth music keeps playing. A slow answer waits until you ask: ask Hermes, give me the answer."
+            : 'Music mode is off. A slow answer plays as a live spoken stream, and that can interrupt Bluetooth music.'
+    );
 }
 
 // "give me the answer" / "any update": reads out the slow answer once it is ready, or says how far Hermes has got.
@@ -196,10 +283,13 @@ function lastAnswer(ctx) {
         const took = mins >= 1 ? ` It has been ${mins} minute${mins === 1 ? '' : 's'}.` : '';
         const hc = ctx.config.hermes || {};
         const msg = hc.notifyTarget && hc.mode !== 'gateway' ? " I'll message you when it's done." : ' Ask me again in a bit.';
+        // Still on the line (not handed off to the background): keep listening, so you can ask again in a few seconds.
+        if (!p.background) return say(`Still working on it.${took}${last}`, { end: false, reprompt: "Say: give me the answer, when you're ready.", conv: p.conv });
         return say(`Still working on it.${took}${last}${msg}`);
     }
     ctx.state.clearPending();
-    return say(p.answer, { end: false, reprompt: 'Anything else?' });
+    const listen = listenAfter(ctx, p.answer);
+    return say(p.answer, { end: !listen, reprompt: listen ? "Go ahead, I'm listening." : undefined, conv: p.conv });
 }
 
 // "cancel the task": stops the Hermes run that is still going.
@@ -246,6 +336,7 @@ async function intent(it, ctx) {
     const name = it.name;
     if (QUERY_INTENTS[name]) {
         const q = slotValue(it, 'query');
+        if (QUERY_INTENTS[name].resume) return q ? chat(q, ctx, { resume: true }) : resumeListen(ctx);
         if (!q) return say("I didn't catch that. Try again.", { end: false, reprompt: 'What would you like to ask?' });
         return chat(`${QUERY_INTENTS[name].prefix}${q}`, ctx);
     }
@@ -278,12 +369,23 @@ async function intent(it, ctx) {
             return stop(ctx);
         case 'AMAZON.HelpIntent':
             return say("Ask me anything. For example: what's on my plate today, or remind me to call Rohan.", { end: false, reprompt: 'What would you like to ask?' });
+        case 'NewChatIntent':
+            return newChat(ctx);
+        case 'MusicModeOnIntent':
+            return musicMode(true, ctx);
+        case 'MusicModeOffIntent':
+            return musicMode(false, ctx);
+        // A yes or no while Hermes is waiting for your answer goes to Hermes.
         case 'AMAZON.YesIntent':
+            if (ctx.attrs && ctx.attrs.conv) return chat('Yes.', ctx);
             return say('What would you like to ask?', { end: false, reprompt: 'Go ahead.' });
         case 'AMAZON.NoIntent':
+            if (ctx.attrs && ctx.attrs.conv) return chat('No.', ctx);
+            return say('Okay.');
         case 'AMAZON.NavigateHomeIntent':
             return say('Okay.');
         case 'AMAZON.FallbackIntent':
+            if (ctx.attrs && ctx.attrs.conv) return say('I missed that. Start your answer with a word like my, the, I or it. For example: the second one.', { end: false, reprompt: 'What is your answer?' });
             return say("I missed that. Say it again, starting with a word like check, show, find, send, what or how.", { end: false, reprompt: 'What would you like to ask?' });
         default:
             return say('Okay.');
@@ -296,7 +398,13 @@ async function handle(envelope, ctx) {
     if (type === 'LaunchRequest') {
         return say('Hermes here. What do you need?', { end: false, reprompt: 'Go ahead, ask me anything.' });
     }
-    if (type === 'IntentRequest') return intent(req.intent || {}, ctx);
+    if (type === 'IntentRequest') {
+        ctx.attrs = (envelope.session && envelope.session.attributes) || {};
+        const out = await intent(req.intent || {}, ctx);
+        // The session stays open and the answer did not name a conversation: carry the current one over.
+        if (out.response && out.response.shouldEndSession === false && out.sessionAttributes === undefined && ctx.attrs.conv) out.sessionAttributes = { conv: ctx.attrs.conv };
+        return out;
+    }
     if (type.startsWith('AudioPlayer.')) return audioEvent(req, ctx);
     if (type === 'System.ExceptionEncountered') ctx.log(`Alexa reported an error: ${JSON.stringify(req.error || {})}`);
     return empty();
@@ -314,6 +422,9 @@ const PLAIN_INTENTS = {
     YoloOnIntent: YOLO_ON_SAMPLES,
     YoloOffIntent: YOLO_OFF_SAMPLES,
     YoloStatusIntent: YOLO_STATUS_SAMPLES,
+    NewChatIntent: NEW_CHAT_SAMPLES,
+    MusicModeOnIntent: MUSIC_ON_SAMPLES,
+    MusicModeOffIntent: MUSIC_OFF_SAMPLES,
 };
 
 // "Ask Hermes <anything>": Alexa only hands over free text that starts with a word the model knows, so the more
@@ -351,7 +462,7 @@ const FILLER_WORDS = [
 ];
 const firstWords = (samples) => samples.map((x) => x.split(' ')[0]);
 (function addCarriers() {
-    const plain = Object.values({ RING_SAMPLES, ANSWER_SAMPLES, CANCEL_SAMPLES, TEST_SAMPLES, TEST_BRIDGE_SAMPLES, TEST_HERMES_SAMPLES, UPDATE_SAMPLES, HEALTH_SAMPLES, YOLO_ON_SAMPLES, YOLO_OFF_SAMPLES, YOLO_STATUS_SAMPLES }).flat();
+    const plain = Object.values({ RING_SAMPLES, ANSWER_SAMPLES, CANCEL_SAMPLES, TEST_SAMPLES, TEST_BRIDGE_SAMPLES, TEST_HERMES_SAMPLES, UPDATE_SAMPLES, HEALTH_SAMPLES, YOLO_ON_SAMPLES, YOLO_OFF_SAMPLES, YOLO_STATUS_SAMPLES, NEW_CHAT_SAMPLES, MUSIC_ON_SAMPLES, MUSIC_OFF_SAMPLES }).flat();
     const used = new Set(Object.values(QUERY_INTENTS).flatMap((q) => q.samples.map((x) => x.replace(' {query}', '').trim())));
     const names = new Set(Object.keys(QUERY_INTENTS));
     const blockedFirst = new Set([...firstWords(plain), 'ask', 'to', 'stop', 'cancel', 'help', 'pause', 'resume', 'repeat', 'start', 'previous', 'yes', 'no']);

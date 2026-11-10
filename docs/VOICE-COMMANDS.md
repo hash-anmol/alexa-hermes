@@ -19,6 +19,23 @@ A custom Alexa skill cannot receive a completely open sentence. Alexa only passe
 
 Alexa limits a model to **350 intents + slots**; each opening word costs two, which is why the list cannot grow without limit. To see the current count: `node bin/alexa-hermes.js model`.
 
+## Conversations: answer Hermes, or pick one up later
+
+Every *"ask Hermes …"* starts a new Hermes conversation (a named Hermes session, `hermes chat --continue <name>`). Two ways to keep one going:
+
+1. **Hermes asks you something.** When its answer ends on a question, the Echo keeps listening. Your reply goes into the same conversation. Start your answer with a word like *my, the, I, it, yes, no* (the same opening-word rule as above), for example *"the work one"* or *"yes"*.
+2. **Come back to it.** Say **"ask Hermes, continue …"** or **"ask Hermes, follow up …"** followed by what you want to add, for example *"continue and move the ten o'clock to noon"*. *"Tell me more"* does the same. On its own, *"ask Hermes, continue"* reopens the last conversation and listens. The last conversation is kept for 12 hours (`skill.resumeHours`), one per Hermes profile.
+
+*"start over"*, *"fresh start"*, *"different topic"* forget the last conversation. After a stream answer that ends on a question, the stream tells you to say *"ask Hermes, continue, and then your answer"*, because a stream cannot listen.
+
+`skill.listen` sets when the Echo keeps listening after an answer: `"question"` (default), `"always"` or `"never"`.
+
+## Bluetooth music and "music mode"
+
+A live spoken stream takes the speaker over, and that **disconnects Bluetooth music**. So an answer that arrives within `skill.speech.quickReplyMs` (default 7 seconds) is said in **Alexa's own voice**: your music just ducks and carries on. Only a slower answer becomes the Kokoro stream (and interrupts the music).
+
+**Music mode** never uses the stream: say *"ask Hermes, music mode on"* (or *protect my music*, *bluetooth mode on*). A slow answer is then kept: Hermes says *"On it"* and the Echo listens for a few seconds, so just say *"give me the answer"* when you are ready (later, say *"Alexa, ask Hermes, give me the answer"*), or get a message if `hermes.notifyTarget` is set. Hermes often needs 8 to 15 seconds, more than the 7 an inline answer can wait, so **music mode is the reliable way to keep Bluetooth connected**. *"Music mode off"* turns the stream back on. Set `skill.speech.quickReplyMs` to `0` to always stream.
+
 ## Built-in commands
 
 | Say | What happens |
@@ -32,6 +49,8 @@ Alexa limits a model to **350 intents + slots**; each opening word costs two, wh
 | *"update Hermes"*, *"upgrade Hermes"* | `hermes update`, spoken as it goes (local and ssh) |
 | *"turn on yolo mode"*, *"stop asking for permission"* | Hermes runs commands without asking (local and ssh) |
 | *"turn off yolo mode"*, *"ask for permission again"*, *"yolo mode status"* | the opposite, and what it is now |
+| *"continue …"*, *"follow up …"*, *"tell me more"*, *"start over"* | pick up, or drop, the last conversation (see above) |
+| *"music mode on"*, *"music mode off"* | never interrupt Bluetooth music with a stream (see above) |
 | *"ring the alarm"*, *"start the alarm"*, *"play the alarm"* | plays your own mp3 on a loop until you say *"Alexa, stop"* |
 
 Add your own phrases for these in `config.json` (`skill.extraPhrases`), for example:

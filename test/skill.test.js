@@ -48,8 +48,125 @@ test('"ask hermes what\'s on my plate": the carrier word is put back and the ans
     const r = await handle(intent('AskWhatsIntent', 'on my plate today'), ctx);
     assert.deepEqual(ctx.asked, ["what's on my plate today"]);
     assert.equal(spoken(r), 'You have two meetings today.');
-    assert.equal(r.response.shouldEndSession, false, 'conversation stays open for a follow-up');
+    assert.equal(r.response.shouldEndSession, true, 'a plain answer ends the session: say "continue" to add to it');
+    assert.match(r.sessionAttributes.conv, /^alexa-/);
+});
+
+test('Hermes ends on a question: the Echo keeps listening, and your reply goes to the same conversation', async () => {
+    reset();
+    const asked = [];
+    const ctx = ctxWith({ askHermes: async (t, o) => (asked.push([t, o.session]), asked.length === 1 ? 'Which account, work or personal?' : 'Done. Sent from work.') });
+    const r1 = await handle(intent('AskSendIntent', 'the report to Rohan'), ctx);
+    assert.equal(r1.response.shouldEndSession, false);
+    assert.ok(r1.response.reprompt);
+    const conv = r1.sessionAttributes.conv;
+    // the reply arrives in the same Alexa session: the session attribute names the conversation
+    const r2 = await handle({ session: { attributes: { conv } }, ...intent('AskFillerIntent', 'work one') }, ctx);
+    assert.equal(asked[1][1], conv, 'same Hermes session');
+    assert.equal(spoken(r2), 'Done. Sent from work.');
+    assert.equal(r2.response.shouldEndSession, true);
+    // yes / no go to Hermes while it waits for you
+    const r3 = await handle({ session: { attributes: { conv } }, request: { type: 'IntentRequest', intent: { name: 'AMAZON.YesIntent' } } }, ctx);
+    assert.equal(asked[2][0], 'Yes.');
+    assert.equal(asked[2][1], conv);
+});
+
+test('listen setting: "always" keeps listening, "never" never does', async () => {
+    reset();
+    const always = ctxWith({ config: { skill: { applicationId: APP, listen: 'always' } } });
+    assert.equal((await handle(intent('AskWhatIntent', 'is up'), always)).response.shouldEndSession, false);
+    const never = ctxWith({ askHermes: async () => 'Which one?', config: { skill: { applicationId: APP, listen: 'never' } } });
+    assert.equal((await handle(intent('AskWhatIntent', 'is up'), never)).response.shouldEndSession, true);
+});
+
+test('continue / follow up: the last conversation goes on, the carrier word is dropped, a fresh ask starts a new one', async () => {
+    reset();
+    const calls = [];
+    const ctx = () => ctxWith({ askHermes: async (t, o) => (calls.push([t, o.session]), 'Okay.') });
+    await handle(intent('AskWhatIntent', 'is on my calendar'), ctx());
+    const first = calls[0][1];
+    clock += 60_000;
+    await handle(intent('AskContinueIntent', 'and move the ten o clock to noon'), ctx());
+    assert.deepEqual(calls[1], ['and move the ten o clock to noon', first], 'same Hermes session, no "continue" in the question');
+    await handle(intent('AskFollowUpIntent', 'who is it with'), ctx());
+    assert.equal(calls[2][1], first);
+    await handle(intent('AskTellIntent', 'more'), ctx());
+    assert.equal(calls[3][1], first, '"tell me more" continues too');
+    await handle(intent('AskHowIntent', 'is the weather'), ctx());
+    assert.notEqual(calls[4][1], first, 'a plain question starts a new conversation');
+    // and "continue" now means that new one
+    await handle(intent('AskContinueIntent', 'in Delhi'), ctx());
+    assert.equal(calls[5][1], calls[4][1]);
+});
+
+test('"continue" alone opens the last conversation and listens; with nothing recent it says so; old ones are not resumed', async () => {
+    reset();
+    const calls = [];
+    const ctx = () => ctxWith({ askHermes: async (t, o) => (calls.push(o.session), 'Okay.') });
+    assert.match(spoken(await handle(intent('AskContinueIntent'), ctx())), /don't have a recent conversation/);
+    await handle(intent('AskWhatIntent', 'is on my calendar'), ctx());
+    const r = await handle(intent('AskContinueIntent'), ctx());
+    assert.equal(r.response.shouldEndSession, false);
+    assert.match(spoken(r), /picking up where we left off.*calendar/);
+    assert.equal(r.sessionAttributes.conv, calls[0]);
+    // 13 hours later the conversation is too old: a new one starts and you are told
+    clock += 13 * 3600_000;
+    const old = await handle(intent('AskContinueIntent', 'and tomorrow'), ctx());
+    assert.notEqual(calls[1], calls[0]);
+    assert.match(spoken(old), /too old/);
+});
+
+test('start over forgets the conversation; each profile keeps its own', async () => {
+    reset();
+    const calls = [];
+    const as = (profile) => ctxWith({ profile, askHermes: async (t, o) => (calls.push([profile, o.session]), 'Okay.') });
+    await handle(intent('AskWhatIntent', 'a'), as('sally'));
+    await handle(intent('AskWhatIntent', 'b'), as('eddie'));
+    await handle(intent('AskContinueIntent', 'c'), as('sally'));
+    assert.equal(calls[2][1], calls[0][1]);
+    assert.notEqual(calls[2][1], calls[1][1]);
+    const r = await handle(intent('NewChatIntent'), as('sally'));
+    assert.deepEqual(r.sessionAttributes, {});
+    assert.match(spoken(await handle(intent('AskContinueIntent'), as('sally'))), /don't have a recent conversation/);
+    assert.match(spoken(await handle(intent('AskContinueIntent'), as('eddie'))), /picking up/);
+});
+
+test('music mode: an answer in time is said in Alexa\'s own voice (no stream, so Bluetooth stays); a slow one becomes a stream unless music mode is on', async () => {
+    reset();
+    const log = [];
+    const voice = (result) => ({
+        start: (q, o) => (log.push(['start', q, o.session, o.defer]), { id: 'v1' }),
+        settle: async () => result,
+        discard: (id) => log.push(['discard', id]),
+        promote: (id) => log.push(['promote', id]),
+    });
+    const base = { voiceUrl: (id) => `https://skill.example/voice/SECRET/${id}.mp3` };
+    // fast: spoken, never a stream
+    let r = await handle(intent('AskWhatIntent', 'is up'), ctxWith({ ...base, voice: voice({ answer: 'Two meetings today.' }) }));
+    assert.equal(spoken(r), 'Two meetings today.');
+    assert.equal(r.response.directives, undefined, 'no AudioPlayer: Bluetooth music is not interrupted');
+    assert.deepEqual(log.map((l) => l[0]), ['start', 'discard']);
+    assert.equal(log[0][3], true, 'speech is held back until we know it is a stream');
+    // slow: the stream takes over
+    log.length = 0;
+    r = await handle(intent('AskWhatIntent', 'is up'), ctxWith({ ...base, voice: voice(null) }));
+    assert.equal(r.response.directives[0].type, 'AudioPlayer.Play');
+    assert.deepEqual(log.map((l) => l[0]), ['start', 'promote']);
+    // slow with music mode on: no stream, the answer is kept
+    assert.match(spoken(await handle(intent('MusicModeOnIntent'), ctxWith())), /Music mode is on/);
+    assert.equal(state.readPrefs().musicMode, true);
+    log.length = 0;
+    r = await handle(intent('AskWhatIntent', 'is up'), ctxWith({ ...base, voice: voice(null) }));
+    assert.equal(r.response.directives, undefined);
+    assert.match(spoken(r), /On it.*give me the answer/);
+    assert.equal(r.response.shouldEndSession, false, 'the session stays open: "give me the answer" works right away');
     assert.ok(r.response.reprompt);
+    assert.deepEqual(log.map((l) => l[0]), ['start'], 'never promoted');
+    assert.match(spoken(await handle(intent('MusicModeOffIntent'), ctxWith())), /Music mode is off/);
+    assert.equal(state.readPrefs().musicMode, false);
+    // an inline failure is spoken plainly
+    r = await handle(intent('AskWhatIntent', 'is up'), ctxWith({ ...base, voice: voice({ error: { spoken: 'Something went wrong with Hermes.' } }) }));
+    assert.equal(spoken(r), 'Something went wrong with Hermes.');
 });
 
 test('conversation can be turned off', async () => {
@@ -205,7 +322,8 @@ test('interaction model matches the handlers and respects Alexa rules', () => {
     for (const n of Object.keys(QUERY_INTENTS)) assert.ok(names.includes(n));
     for (const i of m.intents.filter((x) => QUERY_INTENTS[x.name])) {
         assert.deepEqual(i.slots, [{ name: 'query', type: 'AMAZON.SearchQuery' }]);
-        for (const s of i.samples) assert.match(s, /^[^{]+\{query\}$/, 'SearchQuery needs a carrier phrase before it');
+        // "continue" / "follow up" alone are fine too: they carry no slot
+        for (const s of i.samples) assert.ok(/^[^{]+\{query\}$/.test(s) || (QUERY_INTENTS[i.name].resume && !s.includes('{')), `SearchQuery needs a carrier phrase before it: ${s}`);
     }
     assert.deepEqual(m.intents.find((i) => i.name === 'RingAlarmIntent').samples, RING_SAMPLES);
     // Alexa rejects the build ("total number of slots and intents ... exceeds the limit of 350") above this.
@@ -354,7 +472,14 @@ test('no plain-command sample starts with a question carrier word (Alexa could n
 test('"any update" while Hermes is still going: says how long and the latest step; ready answers are read once', async () => {
     reset();
     const ctx = ctxWith();
-    state.writePending({ status: 'working', question: 'q', startedAt: clock - 3 * 60000, progress: [{ text: 'Searching the web' }, { text: 'Reading the report' }] });
+    // still on the line: the session stays open so you can ask again in a few seconds
+    state.writePending({ status: 'working', question: 'q', startedAt: clock - 5000, conv: 'alexa-x' });
+    const live = await handle(intent('LastAnswerIntent'), ctx);
+    assert.match(spoken(live), /Still working/);
+    assert.equal(live.response.shouldEndSession, false);
+    assert.equal(live.sessionAttributes.conv, 'alexa-x');
+    // handed off to the background: says it will message you, and lets go
+    state.writePending({ status: 'working', question: 'q', background: true, startedAt: clock - 3 * 60000, progress: [{ text: 'Searching the web' }, { text: 'Reading the report' }] });
     const t = spoken(await handle(intent('LastAnswerIntent'), ctx));
     assert.match(t, /3 minutes/);
     assert.match(t, /Reading the report/);
@@ -414,7 +539,8 @@ test('a profile skill ("ask Sally") sends the profile along; a finished backgrou
     const asked = [];
     const t = ctxWith({ profile: 'eddie', askHermes: async (q, o) => (asked.push([q, o]), 'ok ok') });
     await handle(intent('AskWhatIntent', 'time is it'), t);
-    assert.deepEqual(asked[0][1], { profile: 'eddie' });
+    assert.equal(asked[0][1].profile, 'eddie');
+    assert.match(asked[0][1].session, /^alexa-/);
 });
 
 test('server: every profile skill id is accepted, others are refused, and the profile reaches the handler', async () => {
@@ -430,7 +556,7 @@ test('server: every profile skill id is accepted, others are refused, and the pr
         assert.equal((await post('amzn1.ask.skill.sally')).status, 200);
         assert.equal((await post(APP)).status, 200);
         assert.equal((await post('amzn1.ask.skill.other')).status, 403);
-        assert.deepEqual(seen, [{ profile: 'sally' }, undefined]);
+        assert.deepEqual(seen.map((o) => o.profile), ['sally', undefined]);
     } finally {
         server.close();
     }

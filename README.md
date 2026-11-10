@@ -51,6 +51,8 @@ No flags? `./setup.sh` asks questions. Fully scripted example for a remote gatew
 After *"Alexa, ask Hermes …"* (or *"Alexa, open Hermes"* and then speak):
 
 - **Anything.** Whatever you say goes to Hermes as the prompt: *"check my latest emails"*, *"remind me to call Sam at five"*, *"summarize the report in my downloads"*.
+- **Conversations:** when Hermes asks you something the Echo listens; *"ask Hermes, continue …"* / *"follow up …"* / *"tell me more"* pick the last conversation back up; *"start over"* drops it.
+- **Bluetooth music:** short answers are said in Alexa's voice, so your music keeps playing; *"music mode on"* does that for every answer.
 - **Long tasks:** *"any update"*, *"give me the answer"*, *"cancel the task"*.
 - **Health:** *"server health"*, *"test the bridge"*, *"test the Hermes server"*.
 - **Update Hermes:** *"update Hermes"*.
@@ -86,7 +88,7 @@ More in [SECURITY.md](SECURITY.md).
 
 - **Linux** is the supported host (systemd service, health checks use `df`, `free`, `/proc`). macOS runs the skill and answers, but the health commands and `service install` are Linux-only.
 - **Spoken answers** use the offline [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) voice (about 330 MB, CPU only) and `ffmpeg`. Without them the skill still works and answers in text, within Alexa's 8-second limit.
-- Alexa builds a model with at most **350 intents + slots**. This project uses about 323 of them to let almost any sentence through; see [docs/VOICE-COMMANDS.md](docs/VOICE-COMMANDS.md).
+- Alexa builds a model with at most **350 intents + slots**. This project uses about 326 of them to let almost any sentence through; see [docs/VOICE-COMMANDS.md](docs/VOICE-COMMANDS.md).
 - The skill stays in the **development stage** (private). Publishing it to the Alexa store is not supported.
 
 ## Troubleshooting

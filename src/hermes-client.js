@@ -31,7 +31,8 @@ const SPOKEN_RULES = 'Answer for a voice speaker: plain text, no markdown, no li
 const VOICE_RULES =
     'You are talking through an Alexa speaker, and your text is read aloud while you work. Plain text only: no markdown, no lists, no code. ' +
     "Before you start something that needs tools, say one short sentence about what you are about to do, for example: I'll check your calendar. " +
-    'Keep the final answer under 300 characters unless I asked for detail. If something fails, say plainly what failed.';
+    'Keep the final answer under 300 characters unless I asked for detail. If something fails, say plainly what failed. ' +
+    'If you need an answer or a decision from me before you can go on, end your reply with one short question, and ask only that.';
 
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 

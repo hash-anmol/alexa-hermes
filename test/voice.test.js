@@ -189,3 +189,58 @@ test('long silence before the first word: "Still on it." now and then, twice at 
     assert.equal(said.filter((t) => t === 'Still on it.').length, 2);
     assert.equal(said[said.length - 1], 'Finally here is the answer for you.');
 });
+
+test('deferred answer: nothing is spoken until promote(); settle() waits for the answer; discard() leaves nothing behind', async () => {
+    const seen = [];
+    const { voice, state } = setup(async (q, on, opts) => {
+        seen.push(opts.session);
+        await sleep(60);
+        on({ type: 'text', text: 'You have two meetings today. ' });
+        await sleep(20);
+        return { text: 'You have two meetings today.' };
+    });
+    // fast: said inline, so the stream is dropped
+    const a = voice.start('x', { defer: true, session: 'alexa-one' });
+    assert.equal(seen[0], 'alexa-one', 'the Hermes session reaches the run');
+    assert.equal(await voice.settle(a.id, 20), null, 'still working');
+    const done = await voice.settle(a.id, 1000);
+    assert.equal(done.answer, 'You have two meetings today.');
+    voice.discard(a.id);
+    assert.equal(state.pending, null);
+
+    // slow: promoted, then the held speech is on the stream
+    const b = voice.start('y', { defer: true });
+    await sleep(40);
+    const res = fakeRes();
+    voice.promote(b.id);
+    voice.attach(b.id, GET, res);
+    await sleep(200);
+    assert.deepEqual(speech(res), ['You have two meetings today.']);
+});
+
+test('a deferred answer that is never promoted is kept for "give me the answer" (music mode)', async () => {
+    const { voice, state } = setup(async () => {
+        await sleep(30);
+        return { text: 'It is done.' };
+    });
+    const { id } = voice.start('x', { defer: true, session: 'alexa-two' });
+    assert.equal((await voice.settle(id, 1000)).answer, 'It is done.');
+    assert.equal(state.pending.status, 'ready');
+    assert.equal(state.pending.conv, 'alexa-two');
+});
+
+test('stream: a question at the end tells you how to answer it (the stream cannot listen)', async () => {
+    const { voice } = setup(async (q, on) => {
+        on({ type: 'text', text: 'Which account should I use, work or personal? ' });
+        return { text: 'Which account should I use, work or personal?' };
+    });
+    const res = fakeRes();
+    voice.attach(voice.start('x', { hint: true }).id, GET, res);
+    await sleep(150);
+    assert.match(speech(res).join(' '), /say: ask Hermes, continue, and then your answer/);
+    const quiet = setup(async () => ({ text: 'All done and sent to Rohan.' }));
+    const r2 = fakeRes();
+    quiet.voice.attach(quiet.voice.start('x', { hint: true }).id, GET, r2);
+    await sleep(150);
+    assert.doesNotMatch(speech(r2).join(' '), /continue/);
+});

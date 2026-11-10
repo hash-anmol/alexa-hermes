@@ -24,6 +24,7 @@ const crypto = require('crypto');
 const { toSpokenText, VOICE_RULES } = require('./hermes-client');
 const { explain } = require('./lib/errors');
 const yolo = require('./lib/yolo');
+const { askedQuestion } = require('./conversation');
 
 const BYTES_PER_SEC = 6000; // 48 kbps mp3
 const LEAD_SEC = 1.2; // how much audio is kept queued ahead of the player
@@ -92,6 +93,12 @@ function createVoice({ audio, streamHermes, state, config = {}, log = () => {}, 
             this.id = id;
             this.question = question;
             this.profile = opts.profile;
+            this.session = opts.session || null; // Hermes session name: the conversation this question belongs to
+            this.hint = !!opts.hint; // tell you how to answer when Hermes ends on a question (the stream cannot listen)
+            this.deferred = !!opts.defer; // nobody is playing the stream yet: hold speech back until promote() (or drop it)
+            this.held = [];
+            this.result = null;
+            this.donePromise = new Promise((r) => (this.resolveDone = r));
             this.job = opts.run || null; // a non-AI job (e.g. "update Hermes"): runs this instead of asking Hermes
             this.filler = !this.job; // "One moment." / "Still on it." only make sense while Hermes is thinking
             this.lastNoise = now(); // last time anything audible was added (speech or pulse)
@@ -138,6 +145,7 @@ function createVoice({ audio, streamHermes, state, config = {}, log = () => {}, 
         say(text) {
             const clean = toSpokenText(text).slice(0, 400);
             if (!clean) return;
+            if (this.deferred) return void this.held.push(clean);
             log(`say: ${clean}`);
             this.spokenAt = this.quietSince = this.lastNoise = now();
             this.chain = this.chain
@@ -168,6 +176,21 @@ function createVoice({ audio, streamHermes, state, config = {}, log = () => {}, 
             }
         }
 
+        // The Echo is going to play the stream after all (the answer was too slow to say inline): speak what was held back.
+        promote() {
+            if (!this.deferred) return;
+            this.deferred = false;
+            for (const t of this.held.splice(0)) this.say(t);
+        }
+
+        // The answer was given inline instead: nothing to stream, nothing to keep.
+        discard() {
+            this.deferred = false;
+            this.held = [];
+            this.endStream();
+            state.clearPending();
+        }
+
         // Too long to stay on the line: say so, end the stream, keep working.
         handoff() {
             if (this.finished || this.streamEnded) return;
@@ -195,7 +218,7 @@ function createVoice({ audio, streamHermes, state, config = {}, log = () => {}, 
             this.writeWorking();
         }
         writeWorking() {
-            state.writePending({ status: 'working', question: this.question, startedAt: this.startedAt, progress: this.progress.slice(-5), background: this.backgrounded });
+            state.writePending({ status: 'working', question: this.question, startedAt: this.startedAt, progress: this.progress.slice(-5), background: this.backgrounded, conv: this.session });
         }
 
         flushText(final) {
@@ -238,6 +261,7 @@ function createVoice({ audio, streamHermes, state, config = {}, log = () => {}, 
                           timeoutMs: maxMinutes * 60 * 1000,
                           rules: VOICE_RULES,
                           profile: this.profile,
+                          session: this.session || undefined,
                           signal: this.controller.signal,
                       });
                 answer = out.text;
@@ -248,6 +272,9 @@ function createVoice({ audio, streamHermes, state, config = {}, log = () => {}, 
                 }
                 if (!this.backgrounded && answer && !yoloOn() && NEEDS_PERMISSION.test(answer)) {
                     this.say('If you want me to stop asking permission, say: ask Hermes, turn on yolo mode.');
+                }
+                if (this.hint && !this.backgrounded && answer && askedQuestion(answer)) {
+                    this.say('To answer, say: ask Hermes, continue, and then your answer.');
                 }
             } catch (e) {
                 error = explain(e);
@@ -263,12 +290,14 @@ function createVoice({ audio, streamHermes, state, config = {}, log = () => {}, 
             this.finished = true;
             clearTimeout(this.fgTimer);
             clearTimeout(this.ack);
+            this.result = { answer, error };
             const cancelled = error && error.kind === 'cancelled';
             if (this.backgrounded) {
                 this.progress = [];
+                this.resolveDone(this.result);
                 if (cancelled) return state.clearPending();
                 const text = error ? error.spoken : answer;
-                state.writePending({ status: 'ready', question: this.question, answer: text, background: true, startedAt: this.startedAt, readyAt: now() });
+                state.writePending({ status: 'ready', question: this.question, answer: text, background: true, startedAt: this.startedAt, readyAt: now(), conv: this.session });
                 if (notify) {
                     Promise.resolve(notify(`Hermes ${error ? 'hit a problem with' : 'finished'} "${short(this.question)}": ${text}`)).catch((e) => log(`could not notify: ${e.message}`));
                 }
@@ -277,7 +306,8 @@ function createVoice({ audio, streamHermes, state, config = {}, log = () => {}, 
             const delivered = this.subs.size > 0;
             this.endStream();
             if (delivered || !answer) state.clearPending();
-            else state.writePending({ status: 'ready', question: this.question, answer, startedAt: this.startedAt, readyAt: this.endedAt });
+            else state.writePending({ status: 'ready', question: this.question, answer, startedAt: this.startedAt, readyAt: this.endedAt, conv: this.session });
+            this.resolveDone(this.result);
         }
 
         cancel() {
@@ -308,6 +338,9 @@ function createVoice({ audio, streamHermes, state, config = {}, log = () => {}, 
         // Starts Hermes right away (before the Echo has even connected) and returns the id for the stream URL.
         //   opts.profile: which Hermes profile answers (default profile when empty)
         //   opts.preface: something to say first (e.g. "Your earlier task finished: ...")
+        //   opts.session: Hermes session name to continue (keeps the conversation); created when it does not exist yet
+        //   opts.defer:   hold speech back until promote(id): used when the answer may be said inline (settle(id, ms) then discard(id))
+        //   opts.hint:    when Hermes ends on a question, say how to answer it
         //   opts.run:     a function instead of Hermes: ({ say, progress, signal, timeoutMs }) -> Promise<final spoken text>
         start(question, opts = {}) {
             const id = crypto.randomBytes(9).toString('hex');
@@ -319,6 +352,16 @@ function createVoice({ audio, streamHermes, state, config = {}, log = () => {}, 
             return { id };
         },
         has: (id) => sessions.has(id),
+        // Waits up to `ms` for Hermes to finish: { answer, error } when it did, null when it is still working.
+        // The live stream is the fallback for answers that are too slow to say inline.
+        settle(id, ms) {
+            const s = sessions.get(id);
+            if (!s) return Promise.resolve(null);
+            let timer;
+            return Promise.race([s.donePromise, new Promise((r) => (timer = setTimeout(() => r(null), ms)))]).finally(() => clearTimeout(timer));
+        },
+        promote: (id) => sessions.has(id) && sessions.get(id).promote(),
+        discard: (id) => sessions.has(id) && sessions.get(id).discard(),
         attach(id, req, res) {
             const s = sessions.get(id);
             if (!s) return false;

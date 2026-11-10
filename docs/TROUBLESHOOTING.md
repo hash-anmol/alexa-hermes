@@ -37,6 +37,14 @@ You added intents or opening words. Regenerate the model with `node bin/alexa-he
 - Console > Test > *Skill testing is enabled in* must be **Development**.
 - Say *"Alexa, open Hermes"* using the exact invocation name.
 
+## Bluetooth music stops when I ask Hermes
+
+A spoken stream takes the speaker over from Bluetooth. Answers that arrive within 7 seconds are now said in Alexa's voice and leave your music alone. For slow ones, say *"ask Hermes, music mode on"*: the stream is never used, and you say *"give me the answer"* when it is ready. Hermes often needs more than 7 seconds, so music mode is the reliable fix. See *Bluetooth music and "music mode"* in [VOICE-COMMANDS.md](VOICE-COMMANDS.md).
+
+## Hermes asked me something and I could not answer
+
+Only an answer that ends on a question keeps the Echo listening. If it did not, say *"ask Hermes, continue"* and then your answer. Start replies with a word the model knows (*my, the, I, it, yes, no*); otherwise Alexa says *"I missed that"*.
+
 ## Hermes problems
 
 | What you hear / see | Cause and fix |
